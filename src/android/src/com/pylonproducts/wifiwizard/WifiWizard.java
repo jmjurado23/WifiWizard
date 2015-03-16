@@ -1,17 +1,3 @@
-/*
- * Copyright 2015 Matt Parsons
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * 
- *      http://www.apache.org/licenses/LICENSE-2.0
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
- */
 package com.pylonproducts.wifiwizard;
 
 import org.apache.cordova.*;
@@ -27,7 +13,11 @@ import android.net.wifi.WifiEnterpriseConfig;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiInfo;
 import android.content.Context;
+import android.net.ConnectivityManager;
 import android.util.Log;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 
 
 public class WifiWizard extends CordovaPlugin {
@@ -43,15 +33,20 @@ public class WifiWizard extends CordovaPlugin {
     private static final String GET_CONNECTED_SSID = "getConnectedSSID";
     private static final String IS_WIFI_ENABLED = "isWifiEnabled";
     private static final String SET_WIFI_ENABLED = "setWifiEnabled";
+    private static final String DISSABLE_MOBILE_DATA_STATE = "dissableMobileDataState";
     private static final String TAG = "WifiWizard";
 
     private WifiManager wifiManager;
     private CallbackContext callbackContext;
+    private Context context;
+    private ConnectivityManager conman;
 
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
         this.wifiManager = (WifiManager) cordova.getActivity().getSystemService(Context.WIFI_SERVICE);
+        context = this.cordova.getActivity().getApplicationContext();
+        this.conman = (ConnectivityManager) cordova.getActivity().getSystemService(Context.CONNECTIVITY_SERVICE);
     }
 
     @Override
@@ -89,13 +84,16 @@ public class WifiWizard extends CordovaPlugin {
             return this.startScan(callbackContext);
         }
         else if(action.equals(GET_SCAN_RESULTS)) {
-            return this.getScanResults(callbackContext, data);
+            return this.getScanResults(callbackContext);
         }
         else if(action.equals(DISCONNECT)) {
             return this.disconnect(callbackContext);
         }
         else if(action.equals(GET_CONNECTED_SSID)) {
             return this.getConnectedSSID(callbackContext);
+        }
+        else if(action.equals(DISSABLE_MOBILE_DATA_STATE)) {
+            return this.dissableMobileData(callbackContext, data);
         }
         else {
             callbackContext.error("Incorrect action parameter: " + action);
@@ -236,6 +234,33 @@ public class WifiWizard extends CordovaPlugin {
     }
 
     /**
+     * Dissable mobile data.
+     *
+     * @return true if mobile network have been dissabled
+     */
+    private boolean dissableMobileData(CallbackContext callbackContext, JSONArray data) {
+      Log.d(TAG, "WifiWizard: removeNetwork dissableMobileData.");
+      try {
+        final Class conmanClass = Class.forName(conman.getClass().getName());
+        final Field connectivityManagerField = conmanClass.getDeclaredField("mService");
+        connectivityManagerField.setAccessible(true);
+        final Object connectivityManager = connectivityManagerField.get(conman);
+        final Class connectivityManagerClass =  Class.forName(connectivityManager.getClass().getName());
+        final Method setMobileDataEnabledMethod = connectivityManagerClass.getDeclaredMethod("setMobileDataEnabled", Boolean.TYPE);
+        setMobileDataEnabledMethod.setAccessible(true);
+
+        setMobileDataEnabledMethod.invoke(connectivityManager, false);
+        callbackContext.success("Mobile data dissabled");
+      }catch (Exception e) {
+        callbackContext.error(e.getMessage());
+        Log.d(TAG, e.getMessage());
+        return false;
+      }
+
+      return true;
+    }
+
+    /**
      *    This method connects a network.
      *
      *    @param    callbackContext        A Cordova callback context
@@ -361,58 +386,17 @@ public class WifiWizard extends CordovaPlugin {
        *    of the scanned networks.
        *
        *    @param    callbackContext        A Cordova callback context
-       *    @param    data                   JSONArray with [0] == JSONObject
        *    @return    true
        */
-    private boolean getScanResults(CallbackContext callbackContext, JSONArray data) {
+    private boolean getScanResults(CallbackContext callbackContext) {
         List<ScanResult> scanResults = wifiManager.getScanResults();
 
         JSONArray returnList = new JSONArray();
 
-        Integer numLevels = null;
-
-        if (!data.isNull(0)) {
-            try {
-                JSONObject options = data.getJSONObject(0);
-
-                if (options.has("numLevels")) {
-                    Integer levels = options.optInt("numLevels");
-
-                    if (levels > 0) {
-                        numLevels = levels;
-                    } else if (options.optBoolean("numLevels", false)) {
-                        // use previous default for {numLevels: true}
-                        numLevels = 5;
-                    }
-                }
-            } catch (JSONException e) {
-                e.printStackTrace();
-            }
-        }
-
         for (ScanResult scan : scanResults) {
-            /*
-             * @todo - breaking change, remove this notice when tidying new release and explain changes, e.g.:
-             *   0.y.z includes a breaking change to WifiWizard.getScanResults().
-             *   Earlier versions set scans' level attributes to a number derived from wifiManager.calculateSignalLevel.
-             *   This update returns scans' raw RSSI value as the level, per Android spec / APIs.
-             *   If your application depends on the previous behaviour, we have added an options object that will modify behaviour:
-             *   - if `(n == true || n < 2)`, `*.getScanResults({numLevels: n})` will return data as before, split in 5 levels;
-             *   - if `(n > 1)`, `*.getScanResults({numLevels: n})` will calculate the signal level, split in n levels;
-             *   - if `(n == false)`, `*.getScanResults({numLevels: n})` will use the raw signal level;
-             */
-
-            int level;
-
-            if (numLevels == null) {
-              level = scan.level;
-            } else {
-              level = wifiManager.calculateSignalLevel(scan.level, numLevels);
-            }
-
             JSONObject lvl = new JSONObject();
             try {
-                lvl.put("level", level);
+                lvl.put("level", wifiManager.calculateSignalLevel(scan.level, 5));
                 lvl.put("SSID", scan.SSID);
                 lvl.put("BSSID", scan.BSSID);
                 returnList.put(lvl);
